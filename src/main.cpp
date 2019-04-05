@@ -19,8 +19,6 @@ MCUFRIEND_kbv tft; // hard-wired for UNO shields anyway.
 #define F(string_literal) string_literal
 #endif
 
-#include <SoftwareSerial.h>
-
 //----------------------------------------|
 // TFT Breakout  -- Arduino UNO / Mega2560 / OPEN-SMART UNO Black
 // GND              -- GND
@@ -53,9 +51,7 @@ uint8_t YM = 7;  // can be a digital pin
 uint8_t XP = 6;  // can be a digital pin
 uint8_t SwapXY = 0;
 
-uint8_t GRBL_TX = 3;
-uint8_t GRBL_RX = 2;
-SoftwareSerial grbl(GRBL_RX, GRBL_TX); // RX, TX
+#define grbl Serial
 
 // Valores máximos y mínimos del táctil
 uint16_t TS_LEFT = 870;
@@ -73,7 +69,7 @@ TouchScreen ts = TouchScreen(XP, YP, XM, YM, 250);
 TSPoint tp;
 
 File myFile;
-int feedrate = 100;
+int feedrate = 5000;
 
 int CS_PIN = 5; //CS_PIN Tarjeta SD
 const uint8_t SOFT_MISO_PIN = 12;
@@ -176,6 +172,7 @@ void show_tft(void) // FUNCION para mostrar parámetros de la SD. Comentada para
   }
 }
 */
+
 void setup(void)
 {
   uint16_t tmp;
@@ -201,8 +198,7 @@ void setup(void)
     break;
   }
 
-  Serial.begin(115200);
-  grbl.begin(115200);
+  grbl.begin(9600);
 
   tft.begin(0x6814); //to enable RM68140 driver code
   show_Serial();
@@ -238,8 +234,10 @@ void setup(void)
   //tft.drawRect(0, 0, BOXSIZE, BOXSIZEY, WHITE);
   currentcolor = WHITE;
   delay(1000);
-  if (SD.begin(CS_PIN))
-    Serial.println("SD"); // COMENTADO DE MOMENTO YA QUE SI SE INICIALIZA LA SD, LA PANTALLA DEJA DE DIBUJAR.
+  SD.begin(CS_PIN);
+  if (SD.begin(CS_PIN)) {
+    Serial.println(";SD"); // COMENTADO DE MOMENTO YA QUE SI SE INICIALIZA LA SD, LA PANTALLA DEJA DE DIBUJAR.
+  }
 }
 
 double segmentLength = 20; // mm
@@ -274,6 +272,18 @@ double distance(Point p1, Point p2)
   return module(p);
 }
 
+double screenXSize[2] = {0, 500};
+double screenYSize[2] = {350, 0};
+
+double mapX(double x) {
+  return map(x, screenXSize[0], screenXSize[1], 0, width);
+}
+
+double mapY(double y) {
+  //Serial.print("; map y: "); Serial.print(y);Serial.print(" => ");Serial.println(map(y, screenYSize[0], screenYSize[1], 0, height));
+  return map(y, screenYSize[0], screenYSize[1], 0, height);
+}
+
 void generateTranslateGcode(const char *op, double x, double y, double f)
 {
   sprintf(lineBuffer, "%s X", op);
@@ -300,7 +310,7 @@ void waitForOk()
       // Serial.println(c);
       if (lastc == 'o' && c == 'k')
       {
-        Serial.println("GRBL <- OK");
+        //Serial.println("GRBL <- OK");
         return;
       }
       lastc = c;
@@ -311,9 +321,6 @@ void waitForOk()
 
 void sendToGrbl(const char *gcode)
 {
-  Serial.print("GRBL -> ");
-  Serial.println(gcode);
-
   // vaciar buffer
   while (grbl.available())
   {
@@ -340,6 +347,7 @@ Point toPolar(Point cartesian)
   */
   return value;
 }
+
 
 void processLine(char *line)
 {
@@ -373,13 +381,14 @@ void processLine(char *line)
       }
       else
       {
-        Serial.print("Unknown param ");
-        Serial.println(param);
+      //  Serial.print("Unknown param ");
+      //  Serial.println(param);
       }
     }
 
-    Point targetPos = {X, Y};
-    Point vector = getVector(currentPos, targetPos);
+    Point sourcePos = { mapX(currentPos.x), mapY(currentPos.y) };
+    Point targetPos = { mapX(X), mapY(Y) };
+    Point vector = getVector(sourcePos, targetPos);
     double v_mod = module(vector);
 
     double segments = v_mod / segmentLength;
@@ -390,8 +399,8 @@ void processLine(char *line)
     Point nextPosPolar;
     for (int i = 1; i < segments; i++)
     {
-      nextPos.x = currentPos.x + deltaX * i;
-      nextPos.y = currentPos.y + deltaY * i;
+      nextPos.x = sourcePos.x + deltaX * i;
+      nextPos.y = sourcePos.y + deltaY * i;
       nextPosPolar = toPolar(nextPos);
       generateTranslateGcode(op, nextPosPolar.x, nextPosPolar.y, F);
       sendToGrbl(lineBuffer);
@@ -400,8 +409,8 @@ void processLine(char *line)
     generateTranslateGcode(op, nextPosPolar.x, nextPosPolar.y, F);
     sendToGrbl(lineBuffer);
 
-    currentPos.x = targetPos.x;
-    currentPos.y = targetPos.y;
+    currentPos.x = X;
+    currentPos.y = Y;
   }
   else
   {
@@ -421,7 +430,7 @@ void guardasd()
 void pantallaserial()
 {
   generateTranslateGcode("G1", currentPos.x, currentPos.y, feedrate);
-  Serial.println(lineBuffer);
+//  Serial.println(lineBuffer);
 }
 
 void calcfeedrate()
@@ -443,7 +452,7 @@ void sdaserial()
   myFile = SD.open("test.txt");
   while (myFile.available())
   {
-    Serial.write(myFile.read());
+  //  Serial.write(myFile.read());
   }
   myFile.close();
   //Serial.println("-----------");
@@ -457,12 +466,14 @@ void borra()
 
 void setHome()
 {
-  Serial.println("Set Home");
+  //Serial.println("Set Home");
 
   sendToGrbl("G90"); // absolute coordinates
   sendToGrbl("G21");
-  currentPos = {M1.x, M1.y};
-  generateTranslateGcode("G92", M1.x, M1.y, 0.0); // set zero
+  currentPos = {screenXSize[0], screenYSize[1]};
+  double x = mapX(currentPos.x);
+  double y = mapY(currentPos.y);
+  generateTranslateGcode("G92", x, y, 0.0); // set zero
   sendToGrbl(lineBuffer);
 }
 
@@ -533,25 +544,25 @@ void loop()
     {
       if (xpos < BOXSIZE)
       {
-        Serial.println("H");
+      //   Serial.println("H");
         setHome();
         return;
       }
       else if (xpos < BOXSIZE * 2)
       {
         borra();
-        Serial.println("X");
+       //  Serial.println("X");
         return;
       }
       else if (xpos < BOXSIZE * 3)
       {
         sdaserial();
-        Serial.println("S");
+      //   Serial.println("S");
         return;
       }
       else if (xpos < BOXSIZE * 4)
       {
-        Serial.println("->");
+       // Serial.println("->");
         sdagrbl();
         return;
       }
