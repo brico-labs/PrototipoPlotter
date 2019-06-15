@@ -378,8 +378,8 @@ void processLine(char *line)
   double X;
   double Y;
   double F = 100;
-  char *lineCopy = strdup(line);
-  char *op = strtok(lineCopy, " "); // me quedo con la primera palabra antes de un espacio
+  char *lineCopy = strdup(line); // hago una copia de la línea porque strtok es destructivo
+  char *op = strtok(lineCopy, " "); // me quedo con la primera palabra antes de un espacio, que es la operación GCODE
   if ((strcmp(op, "G1") == 0) || (strcmp(op, "G0") == 0)) // solo procesamos los comandos G0 y G1
   {
     char *param;
