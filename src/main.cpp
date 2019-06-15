@@ -53,12 +53,14 @@ uint8_t SwapXY = 0;
 
 #define grbl Serial
 
+const char *defaultImageFile = "test.txt";
+
 // Valores máximos y mínimos del táctil
 uint16_t TS_LEFT = 870;
 uint16_t TS_RT = 165;
 uint16_t TS_TOP = 970;
 uint16_t TS_BOT = 110;
-char *name = "Unknown controller";
+const char *name = "Unknown controller";
 
 const int MIN_POINT_INTERVAL = 100;
 
@@ -253,7 +255,7 @@ double width = 710; // alto del plotter
 Point M1 = {-paddingLeft, height + paddingTop}; // posición del motor izq. en cartesiano
 Point M2 = {width + paddingRight, height + paddingTop};// posición del motor der. en cartesiano
 
-Point currentPos = {0, 0}; // posición actual de la góndola, en coordenadas cartesianas.
+Point currentPos = {0, 0}; // posición actual del punto en la pantalla táctil, coordenadas cartesianas.
                            // IMPORTANTE!: siempre vamos a trabajar en cartesiano hasta que sea obligatorio convertir las coordenadas a polar
 unsigned long currentPosTime = millis();
 
@@ -366,7 +368,7 @@ Point toPolar(Point cartesian)
 }
 
 /**
- * Convierte la línea en coordenadas cartesianas al sistema "polar".
+ * Convierte la línea en coordenadas de la pantalla táctil a cartesiano del mundo real y luego a "polar".
  * Primero se corta la línea en trozos en los espacios para extraer los valores
  * G0 y G1 son rectas, son los únicos comandos que soportamos. Cuando convertimos esa recta
  * a coordenadas "polares" obtenemos una curva.
@@ -383,7 +385,7 @@ void processLine(char *line)
   if ((strcmp(op, "G1") == 0) || (strcmp(op, "G0") == 0)) // solo procesamos los comandos G0 y G1
   {
     char *param;
-    while (param = strtok(NULL, " ")) 
+    while ((param = strtok(NULL, " ")))
     {
       // en bucle, vamos cogiendo cada una de las palabras de la línea. Lo hacemos así para permitir
       // que los parámetros lleguen en cualquier orden o que alguno se omita, por ejemplo:
@@ -469,9 +471,9 @@ void processLine(char *line)
   free(lineCopy);
 }
 
-void guardasd()
+void saveCurrentPosToSD()
 {
-  myFile = SD.open("test.txt", FILE_WRITE);
+  myFile = SD.open(defaultImageFile, FILE_WRITE);
   generateTranslateGcode("G1", currentPos.x, currentPos.y, feedrate);
   myFile.println(lineBuffer);
   myFile.close();
@@ -483,7 +485,7 @@ void pantallaserial()
 //  Serial.println(lineBuffer);
 }
 
-void calcfeedrate()
+void calcFeedrate()
 {
   /* tenemos posición anterior y posición actual. necesitamos distancia entre los dos puntos.
     a = xpos - xpos_old 
@@ -496,10 +498,10 @@ void calcfeedrate()
     */
 }
 
-void sdaserial()
-{ // se sustituirá por "enviargcode", usar para ver que funciona bien "guardasd"
+void sdToSerial()
+{ // se sustituirá por "enviargcode", usar para ver que funciona bien "saveCurrentPosToSD"
   //Serial.println("Archivo test.txt: ");
-  myFile = SD.open("test.txt");
+  myFile = SD.open(defaultImageFile);
   while (myFile.available())
   {
   //  Serial.write(myFile.read());
@@ -510,42 +512,62 @@ void sdaserial()
 
 void borra()
 { // Seica si abres el archivo en modo escritura y lo cierras sin decir nada, se borra el contenido.
-  SD.remove("test.txt");
+  SD.remove(defaultImageFile);
   tft.fillRect(0, BOXSIZEY, tft.width(), tft.height() - BOXSIZEY, BLACK);
 }
 
+/**
+ * Configura GRBL y le indica que la posición de la góndola actual es el punto de inicio
+ */
 void setHome()
 {
   //Serial.println("Set Home");
 
   sendToGrbl("G90"); // absolute coordinates
-  sendToGrbl("G21");
-  currentPos = {screenXSize[0], screenYSize[1]};
+  sendToGrbl("G21"); // mm
+  currentPos = {screenXSize[0], screenYSize[1]}; // la posición fisica debe ser la esquina superior izquierda de la superficie imprimible
   double x = mapX(currentPos.x);
   double y = mapY(currentPos.y);
   generateTranslateGcode("G92", x, y, 0.0); // set zero
   sendToGrbl(lineBuffer);
 }
 
-/** Envía un archivo de la SD al controlador GRBL */
-void sdagrbl()
+/**
+ * Envía un archivo de la SD al controlador GRBL
+ * Lee caracter a caracter y lo va metiendo en lineBuffer hasta que encuentra un salto de línea,
+ *   entonces envía la línea y continua
+ */
+void sdToGrbl()
 {
-  char lineBuffer[50];
-  int lineBufferLength = 0;
-  // enviar G90, G21 y G92 X0 Y0
-  myFile = SD.open("test.txt");
+  int lineBufferLength = 0; // indica la longitud válida del contenido del buffer lineBuffer. 
+  // como es un buffer de tamaño fijo, necesitamos saber dónde acaba, se puede hacer como aquí,
+  // con una variable de longitud, o jugando con poner \0 al final cada vez que se modifica y 
+  // mirando la longitud con strlen, en este caso es más eficiente llevar el contador.
+  
+  // al inicio hay que enviar "G90", "G21" y "G92" para configurar el plotter, es importante llamar a setHome antes de ejecutar esto
+  myFile = SD.open(defaultImageFile);
   while (myFile.available())
   {
     char c = myFile.read();
     if (c == '\n' || c == '\r')
     {
+      // salto de línea, 'cerramos' la línea y la enviamos a GRBL (se convertirá a polar en processLine)
       lineBuffer[lineBufferLength] = '\0';
       processLine(lineBuffer);
-      lineBufferLength = 0;
+      lineBufferLength = 0; 
     }
     else
     {
+      // otro caracter, lo metemos al buffer
       lineBuffer[lineBufferLength++] = c;
+      // variable++ ejecuta la línea completa y luego incrementa la variable. Es equivalente a estas dos líneas:
+      //   lineBuffer[lineBufferLength] = c;
+      //   lineBufferLength = lineBufferLength + 1;
+      // "lineBufferLength = lineBufferLength + 1;" es equivalente a "lineBufferLength++;"
+
+      // ++variable incrementa la variable y luego ejecuta la línea. Es equivalente a estas dos líneas:
+      //   lineBufferLength = lineBufferLength + 1;
+      //   lineBuffer[lineBufferLength] = c;
     }
   }
   lineBuffer[lineBufferLength] = '\0';
@@ -607,14 +629,14 @@ void loop()
       }
       else if (xpos < BOXSIZE * 3)
       {
-        sdaserial();
+        sdToSerial();
       //   Serial.println("S");
         return;
       }
       else if (xpos < BOXSIZE * 4)
       {
        // Serial.println("->");
-        sdagrbl();
+        sdToGrbl();
         return;
       }
     }
@@ -627,7 +649,7 @@ void loop()
       currentPos.y = ypos;
       currentPosTime = millis();
       //pantallaserial();     // escribe en serialmonitor
-      guardasd(); // escribe en SD
+      saveCurrentPosToSD(); // escribe en SD
     }
   }
 }
