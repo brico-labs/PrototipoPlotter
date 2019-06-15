@@ -240,57 +240,75 @@ void setup(void)
   }
 }
 
-double segmentLength = 20; // mm
+double segmentLength = 20; // mm, las rectas en cartesiano se cortan en trozos de esta longitud para convertirlas a polar
 char lineBuffer[50];
 
-double paddingLeft = 0;
-double paddingRight = 0;
-double paddingTop = 0;
+double paddingLeft = 0; // distancia horizontal entre el motor izq. y el borde izq. de la superficie "imprimible"
+double paddingRight = 0; // distancia horizontal entre el motor der. y el borde der. de la superficie "imprimible"
+double paddingTop = 0;// distancia vertical entre los motores y el borde superior de la superficie "imprimible"
 
-double height = 580;
-double width = 710;
+double height = 580; // ancho del plotter
+double width = 710; // alto del plotter
 
-Point M1 = {-paddingLeft, height + paddingTop};
-Point M2 = {width + paddingRight, height + paddingTop};
+Point M1 = {-paddingLeft, height + paddingTop}; // posición del motor izq. en cartesiano
+Point M2 = {width + paddingRight, height + paddingTop};// posición del motor der. en cartesiano
 
-Point currentPos = {0, 0};
+Point currentPos = {0, 0}; // posición actual de la góndola, en coordenadas cartesianas.
+                           // IMPORTANTE!: siempre vamos a trabajar en cartesiano hasta que sea obligatorio convertir las coordenadas a polar
 unsigned long currentPosTime = millis();
 
-double module(Point p)
+double module(Point p) // longitud de un vector
 {
   return sqrt(p.x * p.x + p.y * p.y);
 }
 
-Point getVector(Point p1, Point p2)
+Point getVector(Point p1, Point p2) // vector entre dos puntos
 {
   return {p2.x - p1.x, p2.y - p1.y};
 }
 
-double distance(Point p1, Point p2)
+double distance(Point p1, Point p2) // distancia entre dos puntos
 {
   Point p = getVector(p1, p2);
   return module(p);
 }
 
-double screenXSize[2] = {0, 500};
-double screenYSize[2] = {350, 0};
+double screenXSize[2] = {0, 500}; // tamaño horizontal de la pantalla táctil
+double screenYSize[2] = {350, 0}; // tamaño vertical de la pantalla táctil, están invertidos porque la pantalla táctil
+                                  // incrementa Y cara abajo y queremos que en la real sea cara arriba
 
-double mapX(double x) {
+double mapX(double x) { // convierte la coordenada X del tamaño de la pantalla táctil al tamaño de la pantalla real
   return map(x, screenXSize[0], screenXSize[1], 0, width);
 }
 
-double mapY(double y) {
+double mapY(double y) {// convierte la coordenada Y del tamaño de la pantalla táctil al tamaño de la pantalla real
   //Serial.print("; map y: "); Serial.print(y);Serial.print(" => ");Serial.println(map(y, screenYSize[0], screenYSize[1], 0, height));
   return map(y, screenYSize[0], screenYSize[1], 0, height);
 }
 
+/**
+ * Crea una línea GCODE a partir de una operación, coordenadas y feedrate.
+ * El resultado lo almacena en lineBuffer, es un buffer global
+ */
 void generateTranslateGcode(const char *op, double x, double y, double f)
 {
+  // lineBuffer es un array de 50 caracteres, se hace así para no andar reservando y limpiando memoria, se reaprovecha siempre el mismo
   sprintf(lineBuffer, "%s X", op);
+  // ejemplo: aqui si op es "G1", lineBuffer contiene "G1 X\0" (\0 indica que ahí acaba el texto)
   dtostrf(x, 4, 2, &lineBuffer[strlen(lineBuffer)]);
+  // char* dtostrf(float número, int tamaño, int decimales, char* buffer);
+  // dtostrf convierte un número a texto y lo guarda en el 4 parámetro
+  // strlen(lineBuffer) en el ejemplo será 4, ya que ahí encuentra el caracter fin de texto, \0
+  // &lineBuffer[4] es un puntero que apunta a la posición 5 de lineBuffer, en el ejemplo el caracter fin de cadena
+  //   lineBuffer    --> "G", "1", " ", "X", "\0", ...
+  //                                         ^ 
+  //                                         | 
+  //  &lineBuffer[4] ------------------------+
+  // Es decir, le decimos que converta x a un decimal de 4 dígitos y 2 decimales y que lo meta a partir de la 5ª posición de lineBuffer
+  // lineBuffer pasa a tener "G1 X123.45\0"
   strcpy(&lineBuffer[strlen(lineBuffer)], " Y");
   dtostrf(y, 4, 2, &lineBuffer[strlen(lineBuffer)]);
-  if (f)
+  if (f) // si viene parámetro de feedrate lo metemos
   {
     strcpy(&lineBuffer[strlen(lineBuffer)], " F");
     dtostrf(f, 4, 2, &lineBuffer[strlen(lineBuffer)]);
@@ -321,8 +339,7 @@ void waitForOk()
 
 void sendToGrbl(const char *gcode)
 {
-  // vaciar buffer
-  while (grbl.available())
+  while (grbl.available()) // vaciar buffer
   {
     grbl.read();
   }
@@ -333,8 +350,8 @@ void sendToGrbl(const char *gcode)
 Point toPolar(Point cartesian)
 {
   Point value = {
-      module(getVector(M1, cartesian)),
-      module(getVector(M2, cartesian))};
+      module(getVector(M1, cartesian)), // M1 es la posición en cartesiano del motor izquierdo
+      module(getVector(M2, cartesian))}; // M2 es la posición en cartesiano del motor derecho
   /*
     Serial.print("  Cartesian: ");
     Serial.print(cartesian.x);
@@ -348,35 +365,51 @@ Point toPolar(Point cartesian)
   return value;
 }
 
-
+/**
+ * Convierte la línea en coordenadas cartesianas al sistema "polar".
+ * Primero se corta la línea en trozos en los espacios para extraer los valores
+ * G0 y G1 son rectas, son los únicos comandos que soportamos. Cuando convertimos esa recta
+ * a coordenadas "polares" obtenemos una curva.
+ * Para convertirlos a polar cortamos estas rectas en pequeños y aceptamos que si son lo suficientemente
+ * pequeños la trayectoria en polar se aproxima a una recta
+ */
 void processLine(char *line)
 {
   double X;
   double Y;
   double F = 100;
   char *lineCopy = strdup(line);
-  char *op = strtok(lineCopy, " ");
-  if ((strcmp(op, "G1") == 0) || (strcmp(op, "G0") == 0))
+  char *op = strtok(lineCopy, " "); // me quedo con la primera palabra antes de un espacio
+  if ((strcmp(op, "G1") == 0) || (strcmp(op, "G0") == 0)) // solo procesamos los comandos G0 y G1
   {
     char *param;
-    while (param = strtok(NULL, " "))
+    while (param = strtok(NULL, " ")) 
     {
-      //        Serial.print("Param: ");
-      //        Serial.print(param);
-      //        Serial.println(".");
+      // en bucle, vamos cogiendo cada una de las palabras de la línea. Lo hacemos así para permitir
+      // que los parámetros lleguen en cualquier orden o que alguno se omita, por ejemplo:
+      //   - G1 X0 Y0 F1234
+      //   - G1 X0 F1234
+      //   - G1 Y0 F1234 X8
+      //   - G1 X0 Y0
+
       if (param[0] == 'X')
       {
-        //sscanf(&param[1], "%lf", &X);
-        X = atof(&param[1]);
+        // 'param' contiene aquí, por ejemplo, "X123.45"
+        // es un puntero a caracter, es decir: param -> "X123.45\0"
+        // Es decir, contiene el texto que queremos y el último caracter es "\0", 0 o NULL (los 3 son el mismo caracter)
+        // Este caracter de fin es necesario para las funciones que trabajan con este tipo de dato para saber cuando acaba.
+        //
+        // param[1] apunta al segundo byte, en el ejemplo '1'
+        // &param[1], que es lo mismo que &(param[1]), es un puntero a caracter: &param[1] -> "123.45\0"
+        // Es decir, un puntero como param pero saltándose el primer caracter
+        X = atof(&param[1]); // atof convierte de texto a float
       }
       else if (param[0] == 'Y')
       {
-        //sscanf(&param[1], "%lf", &Y);
         Y = atof(&param[1]);
       }
       else if (param[0] == 'F')
       {
-        //sscanf(&param[1], "%lf", &F);
         F = atof(&param[1]);
       }
       else
@@ -386,29 +419,46 @@ void processLine(char *line)
       }
     }
 
-    Point sourcePos = { mapX(currentPos.x), mapY(currentPos.y) };
-    Point targetPos = { mapX(X), mapY(Y) };
-    Point vector = getVector(sourcePos, targetPos);
+    Point sourcePos = { mapX(currentPos.x), mapY(currentPos.y) }; // posición actual del plotter,
+                                                                  // coordenadas cartesianas con dimensiones de la pantalla real
+    Point targetPos = { mapX(X), mapY(Y) }; // posición final a la que queremos llegar
+    Point vector = getVector(sourcePos, targetPos); // el vector del movimiento que hay que trazar
     double v_mod = module(vector);
 
-    double segments = v_mod / segmentLength;
+    double segments = v_mod / segmentLength; // calculamos el número de segmentos en que se partirá la recta
 
-    double deltaX = vector.x / segments;
-    double deltaY = vector.y / segments;
-    Point nextPos;
-    Point nextPosPolar;
-    for (int i = 1; i < segments; i++)
+    double deltaX = vector.x / segments; // deltaX es la longitud del trozo de recta en horizontal
+    double deltaY = vector.y / segments; // deltaY es la longitud del trozo de recta en vertical
+    Point nextPos; // contendrá la posición final del segmento que estamos procesando, en cartesiano
+    Point nextPosPolar; // posición final del segmento que estamos procesando, en polar, el mismo punto que nextPos en otro sistema de coordenadas
+    for (int i = 1; i < segments; i++) // en bucle para cada uno de los segmentos
     {
-      nextPos.x = sourcePos.x + deltaX * i;
-      nextPos.y = sourcePos.y + deltaY * i;
+      nextPos.x = sourcePos.x + deltaX * i; // posición final en X del final de segmento
+      nextPos.y = sourcePos.y + deltaY * i; // posición final en Y del final de segmento
       nextPosPolar = toPolar(nextPos);
+      // aquí tememos:
+      //   op: operación GCODE, la misma que la origina, G0 o G1. Como es un segmento pequeño es suficientemente válido aproximarlo como una recta
+      //       pero realmente lo trazará como una curva
+      //   nextPosPolar.x: x final del segmento en polar, es decir, distancia del punto final al motor 1
+      //   nextPosPolar.y: y final del segmento en polar, es decir, distancia del punto final al motor y
       generateTranslateGcode(op, nextPosPolar.x, nextPosPolar.y, F);
       sendToGrbl(lineBuffer);
     }
+
+    // Ya procesamos los segmentos "completos", lo hacemos una última vez porque lo normal es que la distancia no sea divisible exacta por los 
+    // segmentos así que queda un segmento más pequeño:
+    // Ejemplo:
+    // Distancia 9cm, segmentos de 2cm
+    //
+    // +--+--+--+--+-+
+    //
+    // segments = v_mod / segmentLength = 9 / 2 = 4
+    // el bucle procesa los 4 primeros, falta procesar el segmento de 1cm final
     nextPosPolar = toPolar(targetPos);
     generateTranslateGcode(op, nextPosPolar.x, nextPosPolar.y, F);
     sendToGrbl(lineBuffer);
 
+    // dejamos almacenada posición actual del plotter (cartesiano)
     currentPos.x = X;
     currentPos.y = Y;
   }
@@ -477,6 +527,7 @@ void setHome()
   sendToGrbl(lineBuffer);
 }
 
+/** Envía un archivo de la SD al controlador GRBL */
 void sdagrbl()
 {
   char lineBuffer[50];
